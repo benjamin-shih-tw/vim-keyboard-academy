@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chapters, lessons, totalCommands, type ChapterId, type Lesson } from "./tutorial-data";
-import { advancePracticeIndex, keyboardEventToken, normalizePracticeCommand, practiceMatch, type PracticeState } from "./practice";
+import { advancePracticeIndex, keyboardEventToken, normalizePracticeCommand, operationAnimation, practiceMatch, type PracticeState } from "./practice";
 
 const STORAGE_KEY = "vim-keyboard-academy-progress";
 
@@ -23,10 +23,11 @@ function highlight(line: string) {
 function Editor({ lesson, showAfter, keyPulse, feedbackKey, feedbackState = "idle" }: { lesson: Lesson; showAfter: boolean; keyPulse: number; feedbackKey?: string; feedbackState?: PracticeState }) {
   const code = showAfter ? lesson.after : lesson.before;
   const cursor = showAfter ? lesson.cursorAfter : lesson.cursorBefore;
-  const feedbackMode = feedbackState === "good" && feedbackKey === "i" ? "INSERT" : feedbackState === "good" && feedbackKey === "v" ? "VISUAL" : undefined;
-  const mode = feedbackMode ?? (showAfter ? "NORMAL" : lesson.mode ?? "NORMAL");
+  const animation = operationAnimation(feedbackKey ?? "", Boolean(lesson.panel));
+  const isAnimating = feedbackState === "good" && Boolean(feedbackKey);
+  const mode = isAnimating ? animation.mode : showAfter ? "NORMAL" : lesson.mode ?? "NORMAL";
   return (
-    <div className="terminal" aria-label="Vim 動畫示範區">
+    <div className={`terminal ${isAnimating ? `is-animating effect-${animation.effect}` : ""}`} aria-label="Vim 動畫示範區">
       <div className="terminal-titlebar">
         <div className="lights" aria-hidden="true"><i /><i /><i /></div>
         <div className="tab-title"><span className="file-plus">＋</span> solution.cpp</div>
@@ -36,6 +37,7 @@ function Editor({ lesson, showAfter, keyPulse, feedbackKey, feedbackState = "idl
         <div className="editor-pane">
           <div className="code" key={`${lesson.id}-${showAfter}-${keyPulse}`}>
             {feedbackKey && <div className={`command-feedback ${feedbackState}`} aria-live="polite"><kbd>{feedbackKey}</kbd><span>{feedbackState === "good" ? "操作成功" : feedbackState === "bad" ? "再試一次" : "等待輸入"}</span></div>}
+            {isAnimating && <div className={`vim-action-overlay effect-${animation.effect}`} aria-live="assertive"><kbd>{feedbackKey}</kbd><span>→</span><strong>{animation.label}</strong></div>}
             {code.map((line, lineIndex) => {
               const lineNo = lineIndex + 1;
               const isCursorLine = cursor?.[0] === lineNo;
@@ -86,9 +88,9 @@ function CompanionPanel({ showAfter }: { showAfter: boolean }) {
   </aside>;
 }
 
-function KeySequence({ keys, pulse, activeIndex }: { keys: string[]; pulse: number; activeIndex?: number }) {
+function KeySequence({ keys, pulse, activeIndex, feedbackState = "idle" }: { keys: string[]; pulse: number; activeIndex?: number; feedbackState?: PracticeState }) {
   return <div className="key-sequence" key={pulse} aria-label={`按鍵：${keys.join("，")}`}>
-    {keys.slice(0, 5).map((key, index) => <span key={`${key}-${index}`}><kbd className={activeIndex === index ? "active" : ""} style={{ animationDelay: `${index * 80}ms` }}>{key}</kbd>{index < Math.min(keys.length, 5) - 1 && <i>→</i>}</span>)}
+    {keys.slice(0, 5).map((key, index) => <span key={`${key}-${index}`}><kbd className={activeIndex === index ? `active ${feedbackState === "good" ? "pressed" : ""}` : ""} style={{ animationDelay: `${index * 80}ms` }}>{key}</kbd>{index < Math.min(keys.length, 5) - 1 && <i>→</i>}</span>)}
     {keys.length > 5 && <em>+{keys.length - 5}</em>}
   </div>;
 }
@@ -198,7 +200,7 @@ export default function Home() {
           setShowAfter(true); setPracticeCount((value) => value + 1); setPulse((value) => value + 1); markComplete(active.id);
           practiceTimerRef.current = window.setTimeout(() => {
             setShowAfter(false); setTyped(""); setPracticeState("idle"); setPracticeKeyIndex((index) => advancePracticeIndex(index, active.keys.length)); setPulse((value) => value + 1);
-          }, 720);
+          }, 1100);
         }
         return;
       }
@@ -240,7 +242,7 @@ export default function Home() {
         </aside>
         <div className="lesson-main">
           <div className="lesson-topline"><div><span>{chapters.find((item) => item.id === active.chapter)?.label}</span><h3>{active.title}</h3><p>{active.description}</p></div><button className={`practice-toggle ${practice ? "active" : ""}`} onClick={practice ? endPractice : beginPractice}><span>⌨</span>{practice ? "結束練習" : "鍵盤練習"}</button></div>
-          <KeySequence keys={active.keys} pulse={pulse} activeIndex={practice ? practiceKeyIndex % active.keys.length : undefined} />
+          <KeySequence keys={active.keys} pulse={pulse} activeIndex={practice ? practiceKeyIndex % active.keys.length : undefined} feedbackState={practiceState} />
           <Editor lesson={active} showAfter={showAfter} keyPulse={pulse} feedbackKey={practice ? currentPracticeKey : undefined} feedbackState={practiceState} />
           {practice && <div ref={practiceSurfaceRef} tabIndex={0} className={`practice-bar ${practiceState}`} aria-label="練習輸入區" aria-live="polite"><span>{practiceState === "good" ? "✓" : practiceState === "bad" ? "×" : "⌨"}</span><div><small>第 {practiceKeyIndex + 1}/{active.keys.length} 個操作 · 完成後自動循環</small><strong>{currentPracticeKey}</strong></div><code>{typed || "_"}</code><b>已練 {practiceCount} 次</b><em>{currentPracticeKey === "Esc" ? "現在請按 Esc" : "Esc 可重設／離開"}</em></div>}
           <div className="player-controls"><button onClick={() => moveLesson(-1)} aria-label="上一課">←</button><button className="play" onClick={() => { if (showAfter) restart(); else setPlaying((value) => !value); }}>{playing ? "Ⅱ 暫停" : showAfter ? "↻ 重播" : "▶ 播放"}</button><button onClick={() => { setShowAfter(true); setPlaying(false); markComplete(active.id); }} aria-label="顯示結果">完成狀態</button><button onClick={() => moveLesson(1)} aria-label="下一課">→</button><label>速度<select value={speed} onChange={(event) => setSpeed(Number(event.target.value))}>{[0.5, 1, 1.5, 2].map((item) => <option key={item} value={item}>{item}×</option>)}</select></label></div>
