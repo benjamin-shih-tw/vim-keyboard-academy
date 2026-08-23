@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chapters, lessons, totalCommands, type ChapterId, type Lesson } from "./tutorial-data";
 import { advancePracticeIndex, keyboardEventToken, normalizePracticeCommand, operationAnimation, practiceMatch, type PracticeState } from "./practice";
+import { createVimState, runVimCommand, type JudgeState, type VimState } from "./vim-simulator";
 
 const STORAGE_KEY = "vim-keyboard-academy-progress";
 
@@ -20,18 +21,23 @@ function highlight(line: string) {
   });
 }
 
-function Editor({ lesson, showAfter, keyPulse, feedbackKey, feedbackState = "idle" }: { lesson: Lesson; showAfter: boolean; keyPulse: number; feedbackKey?: string; feedbackState?: PracticeState }) {
-  const code = showAfter ? lesson.after : lesson.before;
-  const cursor = showAfter ? lesson.cursorAfter : lesson.cursorBefore;
+function createLessonState(lesson: Lesson) {
+  return createVimState(lesson.before, lesson.cursorBefore, lesson.mode ?? "NORMAL", lesson.panel);
+}
+
+function Editor({ lesson, showAfter, keyPulse, feedbackKey, feedbackState = "idle", simulation }: { lesson: Lesson; showAfter: boolean; keyPulse: number; feedbackKey?: string; feedbackState?: PracticeState; simulation?: VimState }) {
+  const code = simulation?.lines ?? (showAfter ? lesson.after : lesson.before);
+  const cursor = simulation?.cursor ?? (showAfter ? lesson.cursorAfter : lesson.cursorBefore);
   const animation = operationAnimation(feedbackKey ?? "", Boolean(lesson.panel));
   const isAnimating = feedbackState === "good" && Boolean(feedbackKey);
-  const mode = isAnimating ? animation.mode : showAfter ? "NORMAL" : lesson.mode ?? "NORMAL";
+  const mode = simulation?.mode ?? (isAnimating ? animation.mode : showAfter ? "NORMAL" : lesson.mode ?? "NORMAL");
+  const fileName = simulation?.workspace.file ?? "solution.cpp";
   return (
-    <div className={`terminal ${isAnimating ? `is-animating effect-${animation.effect}` : ""}`} aria-label="Vim 動畫示範區">
+    <div className={`terminal ${isAnimating ? `is-animating effect-${animation.effect}` : ""} ${simulation?.closed ? "buffer-closed" : ""}`} aria-label="Vim 動畫示範區">
       <div className="terminal-titlebar">
         <div className="lights" aria-hidden="true"><i /><i /><i /></div>
-        <div className="tab-title"><span className="file-plus">＋</span> solution.cpp</div>
-        <div className="terminal-meta">SF Mono · GitHub Dark</div>
+        <div className="tab-title"><span className="file-plus">＋</span> {fileName}</div>
+        <div className="terminal-meta">{simulation ? `${simulation.workspace.splits} split · ${simulation.workspace.tabs} tab` : "SF Mono · GitHub Dark"}</div>
       </div>
       <div className={`workspace ${lesson.panel ? "with-panel" : ""}`}>
         <div className="editor-pane">
@@ -46,35 +52,39 @@ function Editor({ lesson, showAfter, keyPulse, feedbackKey, feedbackState = "idl
               const char = line[col - 1] || " ";
               const after = line.slice(col);
               return (
-                <div className={`code-line ${isCursorLine ? "active-line" : ""}`} key={`${line}-${lineIndex}`}>
+                <div className={`code-line ${isCursorLine ? `active-line ${simulation?.selection ? `selection-${simulation.selection}` : ""}` : ""}`} key={`${line}-${lineIndex}`}>
                   <span className="line-number">{lineNo}</span>
                   <code>{isCursorLine ? <>{highlight(before)}<span className="cursor">{char}</span>{highlight(after)}</> : highlight(line || " ")}</code>
                 </div>
               );
             })}
             {Array.from({ length: Math.max(0, 12 - code.length) }).map((_, index) => <div className="code-line empty" key={`empty-${index}`}><span className="line-number">~</span></div>)}
+            {simulation?.closed && <div className="closed-buffer"><strong>Buffer closed</strong><span>{simulation.message}</span></div>}
           </div>
           <div className="vim-status">
             <strong className={`mode mode-${mode.toLowerCase()}`}>{mode}</strong>
-            <span>solution.cpp {showAfter ? "[完成]" : ""}</span>
+            <span>{simulation?.message ?? `${fileName} ${showAfter ? "[完成]" : ""}`}</span>
             <span className="status-right">cpp&nbsp;&nbsp; utf-8[unix]&nbsp;&nbsp; {cursor?.[0]}:{cursor?.[1]} &nbsp;All</span>
           </div>
         </div>
-        {lesson.panel === "judge" && <JudgePanel showAfter={showAfter} />}
+        {lesson.panel === "judge" && simulation?.judge?.open !== false && <JudgePanel showAfter={showAfter} judge={simulation?.judge} />}
         {lesson.panel === "companion" && <CompanionPanel showAfter={showAfter} />}
       </div>
     </div>
   );
 }
 
-function JudgePanel({ showAfter }: { showAfter: boolean }) {
+function JudgePanel({ showAfter, judge }: { showAfter: boolean; judge?: JudgeState }) {
+  const caseCount = judge?.caseCount ?? 3;
+  const verdict = judge?.verdict ?? (showAfter ? "Accepted" : "Ready");
   return <aside className="judge-panel" aria-label="CPH Modern 模擬面板">
     <div className="panel-title"><span>CPH MODERN</span><span className="live-dot" /> </div>
     <div className="panel-actions"><kbd>a</kbd> add <kbd>d</kbd> delete <kbd>r</kbd> run <kbd>R</kbd> all</div>
-    {["2 7 4", "5 1 3", "1 2 3 4"].map((input, index) => <div className={`test-card ${showAfter ? "passed" : ""}`} key={input}>
-      <div><strong>TC {index + 1}</strong><span>{showAfter ? "Accepted" : "Ready"}</span></div>
-      <code>{input}</code><small>{showAfter ? `${2 + index}.4 ms` : "expected ready"}</small>
+    {Array.from({ length: caseCount }, (_, index) => ["2 7 4", "5 1 3", "1 2 3 4"][index] ?? `${index + 1} ${index + 2}`).map((input, index) => <div className={`test-card ${verdict === "Accepted" ? "passed" : ""} ${judge?.activeCase === index + 1 ? "active-case" : ""}`} key={`${input}-${index}`}>
+      <div><strong>TC {index + 1}</strong><span>{verdict}</span></div>
+      <code>{judge?.editing && judge.activeCase === index + 1 ? "Input: editing…\nExpected: editing…" : input}</code><small>{verdict === "Accepted" ? `${2 + index}.4 ms` : verdict === "Ready" ? "expected ready" : "actual output available"}</small>
     </div>)}
+    {judge?.help && <div className="judge-help"><strong>快捷鍵</strong><span>i edit · a add · d delete</span><span>r run · R all · q close</span></div>}
     <button className="run-all" type="button">▶ Run All <kbd>R</kbd></button>
   </aside>;
 }
@@ -114,6 +124,7 @@ export default function Home() {
   const practiceTimerRef = useRef<number | undefined>(undefined);
 
   const active = lessons.find((item) => item.id === activeId) ?? lessons[0];
+  const [simulation, setSimulation] = useState<VimState>(() => createLessonState(lessons[0]));
   const currentPracticeKey = active.keys[practiceKeyIndex % active.keys.length];
   const filtered = useMemo(() => lessons.filter((item) => {
     const matchChapter = chapter === "all" || item.chapter === chapter;
@@ -134,22 +145,22 @@ export default function Home() {
   }, []);
 
   const restart = useCallback(() => {
-    setShowAfter(false); setPlaying(true); setPulse((value) => value + 1); setTyped(""); setPracticeState("idle"); setPracticeKeyIndex(0);
-  }, []);
+    setShowAfter(false); setPlaying(true); setPulse((value) => value + 1); setTyped(""); setPracticeState("idle"); setPracticeKeyIndex(0); setSimulation(createLessonState(active));
+  }, [active]);
 
   const beginPractice = useCallback(() => {
     if (practiceTimerRef.current) window.clearTimeout(practiceTimerRef.current);
-    setPractice(true); setPlaying(false); setShowAfter(false); setTyped(""); setPracticeState("idle"); setPracticeKeyIndex(0); setPulse((value) => value + 1);
+    setPractice(true); setPlaying(false); setShowAfter(false); setTyped(""); setPracticeState("idle"); setPracticeKeyIndex(0); setSimulation(createLessonState(active)); setPulse((value) => value + 1);
     window.setTimeout(() => {
       document.getElementById("player")?.scrollIntoView({ behavior: "smooth", block: "start" });
       practiceSurfaceRef.current?.focus();
     }, 0);
-  }, []);
+  }, [active]);
 
   const endPractice = useCallback(() => {
     if (practiceTimerRef.current) window.clearTimeout(practiceTimerRef.current);
-    setPractice(false); setTyped(""); setPracticeState("idle"); setShowAfter(false); setPracticeKeyIndex(0);
-  }, []);
+    setPractice(false); setTyped(""); setPracticeState("idle"); setShowAfter(false); setPracticeKeyIndex(0); setSimulation(createLessonState(active));
+  }, [active]);
 
   useEffect(() => { restart(); }, [activeId, restart]);
 
@@ -197,10 +208,10 @@ export default function Home() {
           practiceTimerRef.current = window.setTimeout(() => { setTyped(""); setPracticeState("idle"); }, 520);
         }
         if (nextState === "good") {
-          setShowAfter(true); setPracticeCount((value) => value + 1); setPulse((value) => value + 1); markComplete(active.id);
+          setShowAfter(true); setSimulation((current) => runVimCommand(current, currentPracticeKey, active)); setPracticeCount((value) => value + 1); setPulse((value) => value + 1); markComplete(active.id);
           practiceTimerRef.current = window.setTimeout(() => {
-            setShowAfter(false); setTyped(""); setPracticeState("idle"); setPracticeKeyIndex((index) => advancePracticeIndex(index, active.keys.length)); setPulse((value) => value + 1);
-          }, 1100);
+            setShowAfter(false); setSimulation(createLessonState(active)); setTyped(""); setPracticeState("idle"); setPracticeKeyIndex((index) => advancePracticeIndex(index, active.keys.length)); setPulse((value) => value + 1);
+          }, 1600);
         }
         return;
       }
@@ -243,7 +254,7 @@ export default function Home() {
         <div className="lesson-main">
           <div className="lesson-topline"><div><span>{chapters.find((item) => item.id === active.chapter)?.label}</span><h3>{active.title}</h3><p>{active.description}</p></div><button className={`practice-toggle ${practice ? "active" : ""}`} onClick={practice ? endPractice : beginPractice}><span>⌨</span>{practice ? "結束練習" : "鍵盤練習"}</button></div>
           <KeySequence keys={active.keys} pulse={pulse} activeIndex={practice ? practiceKeyIndex % active.keys.length : undefined} feedbackState={practiceState} />
-          <Editor lesson={active} showAfter={showAfter} keyPulse={pulse} feedbackKey={practice ? currentPracticeKey : undefined} feedbackState={practiceState} />
+          <Editor lesson={active} showAfter={showAfter} keyPulse={pulse} feedbackKey={practice ? currentPracticeKey : undefined} feedbackState={practiceState} simulation={practice ? simulation : undefined} />
           {practice && <div ref={practiceSurfaceRef} tabIndex={0} className={`practice-bar ${practiceState}`} aria-label="練習輸入區" aria-live="polite"><span>{practiceState === "good" ? "✓" : practiceState === "bad" ? "×" : "⌨"}</span><div><small>第 {practiceKeyIndex + 1}/{active.keys.length} 個操作 · 完成後自動循環</small><strong>{currentPracticeKey}</strong></div><code>{typed || "_"}</code><b>已練 {practiceCount} 次</b><em>{currentPracticeKey === "Esc" ? "現在請按 Esc" : "Esc 可重設／離開"}</em></div>}
           <div className="player-controls"><button onClick={() => moveLesson(-1)} aria-label="上一課">←</button><button className="play" onClick={() => { if (showAfter) restart(); else setPlaying((value) => !value); }}>{playing ? "Ⅱ 暫停" : showAfter ? "↻ 重播" : "▶ 播放"}</button><button onClick={() => { setShowAfter(true); setPlaying(false); markComplete(active.id); }} aria-label="顯示結果">完成狀態</button><button onClick={() => moveLesson(1)} aria-label="下一課">→</button><label>速度<select value={speed} onChange={(event) => setSpeed(Number(event.target.value))}>{[0.5, 1, 1.5, 2].map((item) => <option key={item} value={item}>{item}×</option>)}</select></label></div>
         </div>
