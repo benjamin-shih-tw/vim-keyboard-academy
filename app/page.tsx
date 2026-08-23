@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chapters, lessons, totalCommands, type ChapterId, type Lesson } from "./tutorial-data";
+import { advancePracticeIndex, keyboardEventToken, normalizePracticeCommand, practiceMatch, type PracticeState } from "./practice";
 
 const STORAGE_KEY = "vim-keyboard-academy-progress";
 
@@ -19,10 +20,11 @@ function highlight(line: string) {
   });
 }
 
-function Editor({ lesson, showAfter, keyPulse }: { lesson: Lesson; showAfter: boolean; keyPulse: number }) {
+function Editor({ lesson, showAfter, keyPulse, feedbackKey, feedbackState = "idle" }: { lesson: Lesson; showAfter: boolean; keyPulse: number; feedbackKey?: string; feedbackState?: PracticeState }) {
   const code = showAfter ? lesson.after : lesson.before;
   const cursor = showAfter ? lesson.cursorAfter : lesson.cursorBefore;
-  const mode = showAfter ? "NORMAL" : lesson.mode ?? "NORMAL";
+  const feedbackMode = feedbackState === "good" && feedbackKey === "i" ? "INSERT" : feedbackState === "good" && feedbackKey === "v" ? "VISUAL" : undefined;
+  const mode = feedbackMode ?? (showAfter ? "NORMAL" : lesson.mode ?? "NORMAL");
   return (
     <div className="terminal" aria-label="Vim 動畫示範區">
       <div className="terminal-titlebar">
@@ -33,6 +35,7 @@ function Editor({ lesson, showAfter, keyPulse }: { lesson: Lesson; showAfter: bo
       <div className={`workspace ${lesson.panel ? "with-panel" : ""}`}>
         <div className="editor-pane">
           <div className="code" key={`${lesson.id}-${showAfter}-${keyPulse}`}>
+            {feedbackKey && <div className={`command-feedback ${feedbackState}`} aria-live="polite"><kbd>{feedbackKey}</kbd><span>{feedbackState === "good" ? "操作成功" : feedbackState === "bad" ? "再試一次" : "等待輸入"}</span></div>}
             {code.map((line, lineIndex) => {
               const lineNo = lineIndex + 1;
               const isCursorLine = cursor?.[0] === lineNo;
@@ -83,9 +86,9 @@ function CompanionPanel({ showAfter }: { showAfter: boolean }) {
   </aside>;
 }
 
-function KeySequence({ keys, pulse }: { keys: string[]; pulse: number }) {
+function KeySequence({ keys, pulse, activeIndex }: { keys: string[]; pulse: number; activeIndex?: number }) {
   return <div className="key-sequence" key={pulse} aria-label={`按鍵：${keys.join("，")}`}>
-    {keys.slice(0, 5).map((key, index) => <span key={`${key}-${index}`}><kbd style={{ animationDelay: `${index * 80}ms` }}>{key}</kbd>{index < Math.min(keys.length, 5) - 1 && <i>→</i>}</span>)}
+    {keys.slice(0, 5).map((key, index) => <span key={`${key}-${index}`}><kbd className={activeIndex === index ? "active" : ""} style={{ animationDelay: `${index * 80}ms` }}>{key}</kbd>{index < Math.min(keys.length, 5) - 1 && <i>→</i>}</span>)}
     {keys.length > 5 && <em>+{keys.length - 5}</em>}
   </div>;
 }
@@ -99,12 +102,17 @@ export default function Home() {
   const [speed, setSpeed] = useState(1);
   const [pulse, setPulse] = useState(0);
   const [practice, setPractice] = useState(false);
+  const [practiceKeyIndex, setPracticeKeyIndex] = useState(0);
+  const [practiceCount, setPracticeCount] = useState(0);
   const [typed, setTyped] = useState("");
-  const [practiceState, setPracticeState] = useState<"idle" | "good" | "bad">("idle");
+  const [practiceState, setPracticeState] = useState<PracticeState>("idle");
   const [completed, setCompleted] = useState<Set<string>>(new Set());
   const searchRef = useRef<HTMLInputElement>(null);
+  const practiceSurfaceRef = useRef<HTMLDivElement>(null);
+  const practiceTimerRef = useRef<number | undefined>(undefined);
 
   const active = lessons.find((item) => item.id === activeId) ?? lessons[0];
+  const currentPracticeKey = active.keys[practiceKeyIndex % active.keys.length];
   const filtered = useMemo(() => lessons.filter((item) => {
     const matchChapter = chapter === "all" || item.chapter === chapter;
     const haystack = `${item.title} ${item.description} ${item.keys.join(" ")}`.toLowerCase();
@@ -124,10 +132,28 @@ export default function Home() {
   }, []);
 
   const restart = useCallback(() => {
-    setShowAfter(false); setPlaying(true); setPulse((value) => value + 1); setTyped(""); setPracticeState("idle");
+    setShowAfter(false); setPlaying(true); setPulse((value) => value + 1); setTyped(""); setPracticeState("idle"); setPracticeKeyIndex(0);
+  }, []);
+
+  const beginPractice = useCallback(() => {
+    if (practiceTimerRef.current) window.clearTimeout(practiceTimerRef.current);
+    setPractice(true); setPlaying(false); setShowAfter(false); setTyped(""); setPracticeState("idle"); setPracticeKeyIndex(0); setPulse((value) => value + 1);
+    window.setTimeout(() => {
+      document.getElementById("player")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      practiceSurfaceRef.current?.focus();
+    }, 0);
+  }, []);
+
+  const endPractice = useCallback(() => {
+    if (practiceTimerRef.current) window.clearTimeout(practiceTimerRef.current);
+    setPractice(false); setTyped(""); setPracticeState("idle"); setShowAfter(false); setPracticeKeyIndex(0);
   }, []);
 
   useEffect(() => { restart(); }, [activeId, restart]);
+
+  useEffect(() => () => {
+    if (practiceTimerRef.current) window.clearTimeout(practiceTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (!playing || practice) return;
@@ -151,15 +177,29 @@ export default function Home() {
       if (event.key === "/") { event.preventDefault(); searchRef.current?.focus(); return; }
       if (practice) {
         event.preventDefault();
-        if (event.key === "Escape") { setPractice(false); setTyped(""); return; }
-        const printable = event.key.length === 1 ? event.key : event.key === "Enter" ? "↵" : event.key === "Tab" ? "⇥" : "";
-        if (!printable) return;
-        const next = typed + printable;
+        const expected = normalizePracticeCommand(currentPracticeKey);
+        if (event.key === "Escape" && expected !== "Esc") {
+          if (typed) { setTyped(""); setPracticeState("idle"); }
+          else endPractice();
+          return;
+        }
+        if (practiceState === "good") return;
+        const token = keyboardEventToken(event);
+        if (!token) return;
+        const next = typed + token;
+        const nextState = practiceMatch(next, currentPracticeKey);
         setTyped(next);
-        const expected = active.keys[0].replace("<Tab>", "⇥").replace("Enter", "↵");
-        if (expected.startsWith(next)) setPracticeState(next === expected ? "good" : "idle");
-        else setPracticeState("bad");
-        if (next === expected) { setShowAfter(true); markComplete(active.id); window.setTimeout(() => { setTyped(""); setPracticeState("idle"); }, 900); }
+        setPracticeState(nextState);
+        if (practiceTimerRef.current) window.clearTimeout(practiceTimerRef.current);
+        if (nextState === "bad") {
+          practiceTimerRef.current = window.setTimeout(() => { setTyped(""); setPracticeState("idle"); }, 520);
+        }
+        if (nextState === "good") {
+          setShowAfter(true); setPracticeCount((value) => value + 1); setPulse((value) => value + 1); markComplete(active.id);
+          practiceTimerRef.current = window.setTimeout(() => {
+            setShowAfter(false); setTyped(""); setPracticeState("idle"); setPracticeKeyIndex((index) => advancePracticeIndex(index, active.keys.length)); setPulse((value) => value + 1);
+          }, 720);
+        }
         return;
       }
       if (event.code === "Space") { event.preventDefault(); setPlaying((value) => !value); }
@@ -169,7 +209,7 @@ export default function Home() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [practice, typed, active, markComplete, restart]);
+  }, [practice, typed, practiceState, currentPracticeKey, active, markComplete, restart, endPractice]);
 
   const progress = Math.round((completed.size / lessons.length) * 100);
   return <main>
@@ -184,7 +224,7 @@ export default function Home() {
         <p className="eyebrow"><span /> BUILT FOR COMPETITIVE PROGRAMMING</p>
         <h1>用鍵盤，把 Vim<br />練成<span>肌肉記憶。</span></h1>
         <p className="hero-lead">不是快捷鍵清單。每個操作都在你的 GitHub Dark 編輯器與 CPH Modern 工作流裡，逐鍵播放、立即練習。</p>
-        <div className="hero-actions"><a className="primary" href="#player">▶ 開始第一課</a><button type="button" onClick={() => setPractice(true)}>⌨ 直接練習</button></div>
+        <div className="hero-actions"><a className="primary" href="#player">▶ 開始第一課</a><button type="button" onClick={beginPractice}>⌨ 直接練習</button></div>
         <div className="stats"><div><strong>{lessons.length}</strong><span>互動課程</span></div><div><strong>{totalCommands}</strong><span>個操作</span></div><div><strong>0</strong><span>滑鼠需求</span></div></div>
       </div>
       <div className="hero-preview"><Editor lesson={lessons[40]} showAfter keyPulse={1} /><div className="floating-key"><kbd>\j</kbd><span>Judge ready</span></div></div>
@@ -199,10 +239,10 @@ export default function Home() {
           <div className="lesson-list">{filtered.map((item) => <button className={`${item.id === active.id ? "active" : ""} ${completed.has(item.id) ? "complete" : ""}`} onClick={() => chooseLesson(item.id)} key={item.id}><i>{completed.has(item.id) ? "✓" : String(lessons.indexOf(item) + 1).padStart(2, "0")}</i><span><strong>{item.title}</strong><small>{item.keys.slice(0, 3).join(" · ")}</small></span></button>)}{!filtered.length && <p className="empty-search">找不到符合的課程</p>}</div>
         </aside>
         <div className="lesson-main">
-          <div className="lesson-topline"><div><span>{chapters.find((item) => item.id === active.chapter)?.label}</span><h3>{active.title}</h3><p>{active.description}</p></div><button className={`practice-toggle ${practice ? "active" : ""}`} onClick={() => { setPractice((value) => !value); setPlaying(false); setTyped(""); }}><span>⌨</span>{practice ? "結束練習" : "鍵盤練習"}</button></div>
-          <KeySequence keys={active.keys} pulse={pulse} />
-          <Editor lesson={active} showAfter={showAfter} keyPulse={pulse} />
-          {practice && <div className={`practice-bar ${practiceState}`}><span>{practiceState === "good" ? "✓" : practiceState === "bad" ? "×" : "⌨"}</span><div><small>請直接按下</small><strong>{active.keys[0]}</strong></div><code>{typed || "_"}</code><em>Esc 離開</em></div>}
+          <div className="lesson-topline"><div><span>{chapters.find((item) => item.id === active.chapter)?.label}</span><h3>{active.title}</h3><p>{active.description}</p></div><button className={`practice-toggle ${practice ? "active" : ""}`} onClick={practice ? endPractice : beginPractice}><span>⌨</span>{practice ? "結束練習" : "鍵盤練習"}</button></div>
+          <KeySequence keys={active.keys} pulse={pulse} activeIndex={practice ? practiceKeyIndex % active.keys.length : undefined} />
+          <Editor lesson={active} showAfter={showAfter} keyPulse={pulse} feedbackKey={practice ? currentPracticeKey : undefined} feedbackState={practiceState} />
+          {practice && <div ref={practiceSurfaceRef} tabIndex={0} className={`practice-bar ${practiceState}`} aria-label="練習輸入區" aria-live="polite"><span>{practiceState === "good" ? "✓" : practiceState === "bad" ? "×" : "⌨"}</span><div><small>第 {practiceKeyIndex + 1}/{active.keys.length} 個操作 · 完成後自動循環</small><strong>{currentPracticeKey}</strong></div><code>{typed || "_"}</code><b>已練 {practiceCount} 次</b><em>{currentPracticeKey === "Esc" ? "現在請按 Esc" : "Esc 可重設／離開"}</em></div>}
           <div className="player-controls"><button onClick={() => moveLesson(-1)} aria-label="上一課">←</button><button className="play" onClick={() => { if (showAfter) restart(); else setPlaying((value) => !value); }}>{playing ? "Ⅱ 暫停" : showAfter ? "↻ 重播" : "▶ 播放"}</button><button onClick={() => { setShowAfter(true); setPlaying(false); markComplete(active.id); }} aria-label="顯示結果">完成狀態</button><button onClick={() => moveLesson(1)} aria-label="下一課">→</button><label>速度<select value={speed} onChange={(event) => setSpeed(Number(event.target.value))}>{[0.5, 1, 1.5, 2].map((item) => <option key={item} value={item}>{item}×</option>)}</select></label></div>
         </div>
       </div>
