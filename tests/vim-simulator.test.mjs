@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createVimState, runVimCommand } from "../app/vim-simulator.ts";
+import { lessons } from "../app/tutorial-data.ts";
 
 test("mode commands change the real Vim mode", () => {
   const initial = createVimState(["int main() {}"], [1, 5]);
@@ -40,4 +42,38 @@ test("judge commands add, delete, edit and run actual testcase state", () => {
   assert.equal(runVimCommand(initial, "i", { panel: "judge" }).judge?.editing, true);
   assert.equal(runVimCommand(initial, "\\r", { panel: "judge" }).judge?.verdict, "Accepted");
   assert.equal(runVimCommand(initial, "q", { panel: "judge" }).judge?.open, false);
+});
+
+function renderedState(state) {
+  return JSON.stringify({
+    lines: state.lines,
+    cursor: state.cursor,
+    mode: state.mode,
+    selection: state.selection,
+    judge: state.judge,
+    workspace: state.workspace,
+    saved: state.saved,
+    closed: state.closed,
+    visual: state.visual,
+  });
+}
+
+test("every course operation produces a substantive rendered Vim change", () => {
+  const unchanged = [];
+  const visualKinds = new Set();
+  for (const lesson of lessons) {
+    for (const command of lesson.keys) {
+      const initial = createVimState(lesson.before, lesson.cursorBefore, "NORMAL", lesson.panel);
+      const result = runVimCommand(initial, command, lesson);
+      if (result.visual) visualKinds.add(result.visual.kind);
+      if (renderedState(result) === renderedState(initial)) unchanged.push(`${lesson.id}:${command}`);
+    }
+  }
+  assert.deepEqual(unchanged, []);
+
+  const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  for (const kind of visualKinds) {
+    assert.ok(css.includes(`.visual-${kind}`) || page.includes(`visual.kind === "${kind}"`), `${kind} has no rendered animation`);
+  }
 });

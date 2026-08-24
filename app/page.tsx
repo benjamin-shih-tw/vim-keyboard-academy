@@ -22,7 +22,27 @@ function highlight(line: string) {
 }
 
 function createLessonState(lesson: Lesson) {
-  return createVimState(lesson.before, lesson.cursorBefore, lesson.mode ?? "NORMAL", lesson.panel);
+  const state = createVimState(lesson.before, lesson.cursorBefore, "NORMAL", lesson.panel);
+  if (lesson.id === "judge-open" && state.judge) state.judge.open = false;
+  if (["resize", "close-window"].includes(lesson.id)) { state.workspace.splits = 2; state.workspace.layout = "vertical"; }
+  if (lesson.id === "netrw") state.workspace.view = "netrw";
+  return state;
+}
+
+function VimVisualLayer({ state }: { state: VimState }) {
+  const visual = state.visual;
+  if (!visual) return null;
+  if (visual.kind === "search") return <div className="search-visual"><kbd>{visual.command.startsWith("?") ? "?" : "/"}</kbd><strong>{visual.query || "highlight cleared"}</strong><i /></div>;
+  if (visual.kind === "register") return <><div className="copy-flight">{state.clipboard[0]?.slice(0, 18) || "text"}</div><div className="register-drawer"><span>REGISTER {visual.register}</span><code>{state.clipboard.slice(0, 2).join(" ↵ ")}</code></div></>;
+  if (visual.kind === "macro") return <div className="macro-recorder"><i /> REC @{visual.register} <b>×{visual.count}</b></div>;
+  if (visual.kind === "command") return <div className="command-line-visual"><span>:</span><strong>{visual.command.replace(/^:/, "")}</strong><i /></div>;
+  if (visual.kind === "buffer") return <div className="buffer-picker"><div><b>1</b><strong>%a solution.cpp</strong></div><div><b>2</b><span>h template.cpp</span></div><i /></div>;
+  if (visual.kind === "viewport") return <div className="viewport-rail"><span /><i /></div>;
+  if (visual.kind === "jump") return <div className="jump-beacon"><i /><span>{visual.command}</span></div>;
+  if (visual.kind === "netrw") return <div className="netrw-path">NETRW /Users/benjamin/Documents/CODE/</div>;
+  if (visual.kind === "template") return <div className="snippet-expansion"><kbd>Tab</kbd><i /><span>9 lines expanded</span></div>;
+  if (visual.kind === "companion") return <div className="import-stream"><i /><i /><i /><span>problem → file → samples</span></div>;
+  return null;
 }
 
 function Editor({ lesson, showAfter, keyPulse, feedbackKey, feedbackState = "idle", simulation }: { lesson: Lesson; showAfter: boolean; keyPulse: number; feedbackKey?: string; feedbackState?: PracticeState; simulation?: VimState }) {
@@ -32,11 +52,12 @@ function Editor({ lesson, showAfter, keyPulse, feedbackKey, feedbackState = "idl
   const isAnimating = feedbackState === "good" && Boolean(feedbackKey);
   const mode = simulation?.mode ?? (isAnimating ? animation.mode : showAfter ? "NORMAL" : lesson.mode ?? "NORMAL");
   const fileName = simulation?.workspace.file ?? "solution.cpp";
+  const visualClass = simulation?.visual ? `visual-${simulation.visual.kind} visual-direction-${simulation.visual.direction ?? "none"}` : "";
   return (
-    <div className={`terminal ${isAnimating ? `is-animating effect-${animation.effect}` : ""} ${simulation?.closed ? "buffer-closed" : ""}`} aria-label="Vim 動畫示範區">
+    <div className={`terminal ${isAnimating ? `is-animating effect-${animation.effect}` : ""} ${simulation?.closed ? "buffer-closed" : ""} ${visualClass}`} aria-label="Vim 動畫示範區">
       <div className="terminal-titlebar">
         <div className="lights" aria-hidden="true"><i /><i /><i /></div>
-        <div className="tab-title"><span className="file-plus">＋</span> {fileName}</div>
+        <div className="tab-title simulated-tabs"><span className="file-plus">＋</span>{Array.from({ length: simulation?.workspace.tabs ?? 1 }, (_, index) => <span className={simulation?.workspace.activeTab === index + 1 ? "active" : ""} key={index}>{index ? `tab-${index + 1}.cpp` : fileName}</span>)}</div>
         <div className="terminal-meta">{simulation ? `${simulation.workspace.splits} split · ${simulation.workspace.tabs} tab` : "SF Mono · GitHub Dark"}</div>
       </div>
       <div className={`workspace ${lesson.panel ? "with-panel" : ""}`}>
@@ -44,21 +65,25 @@ function Editor({ lesson, showAfter, keyPulse, feedbackKey, feedbackState = "idl
           <div className="code" key={`${lesson.id}-${showAfter}-${keyPulse}`}>
             {feedbackKey && <div className={`command-feedback ${feedbackState}`} aria-live="polite"><kbd>{feedbackKey}</kbd><span>{feedbackState === "good" ? "操作成功" : feedbackState === "bad" ? "再試一次" : "等待輸入"}</span></div>}
             {isAnimating && <div className={`vim-action-overlay effect-${animation.effect}`} aria-live="assertive"><kbd>{feedbackKey}</kbd><span>→</span><strong>{animation.label}</strong></div>}
+            {simulation && <VimVisualLayer state={simulation} />}
+            <div className="code-buffer">
             {code.map((line, lineIndex) => {
               const lineNo = lineIndex + 1;
               const isCursorLine = cursor?.[0] === lineNo;
+              const isSearchMatch = simulation?.visual?.kind === "search" && Boolean(simulation.visual.query) && (isCursorLine || line.toLowerCase().includes(simulation.visual.query.toLowerCase()));
               const col = Math.max(1, cursor?.[1] ?? 1);
               const before = line.slice(0, col - 1);
               const char = line[col - 1] || " ";
               const after = line.slice(col);
               return (
-                <div className={`code-line ${isCursorLine ? `active-line ${simulation?.selection ? `selection-${simulation.selection}` : ""}` : ""}`} key={`${line}-${lineIndex}`}>
-                  <span className="line-number">{lineNo}</span>
+                <div className={`code-line ${isCursorLine ? `active-line ${simulation?.selection ? `selection-${simulation.selection}` : ""}` : ""} ${isSearchMatch ? "search-match" : ""}`} key={`${line}-${lineIndex}`}>
+                  <span className="line-number">{simulation?.visual?.kind === "jump" && isCursorLine ? <b className="gutter-mark">●</b> : null}{lineNo}</span>
                   <code>{isCursorLine ? <>{highlight(before)}<span className="cursor">{char}</span>{highlight(after)}</> : highlight(line || " ")}</code>
                 </div>
               );
             })}
             {Array.from({ length: Math.max(0, 12 - code.length) }).map((_, index) => <div className="code-line empty" key={`empty-${index}`}><span className="line-number">~</span></div>)}
+            </div>
             {simulation?.closed && <div className="closed-buffer"><strong>Buffer closed</strong><span>{simulation.message}</span></div>}
           </div>
           <div className="vim-status">
@@ -67,6 +92,7 @@ function Editor({ lesson, showAfter, keyPulse, feedbackKey, feedbackState = "idl
             <span className="status-right">cpp&nbsp;&nbsp; utf-8[unix]&nbsp;&nbsp; {cursor?.[0]}:{cursor?.[1]} &nbsp;All</span>
           </div>
         </div>
+        {simulation && simulation.workspace.splits > 1 && <div className={`simulated-split split-${simulation.workspace.layout} size-${simulation.workspace.splitSize}`}><div className={simulation.workspace.activeSplit === 2 ? "active" : ""}><strong>{fileName}</strong>{code.slice(0, 5).map((line, index) => <code key={index}>{line || " "}</code>)}</div></div>}
         {lesson.panel === "judge" && simulation?.judge?.open !== false && <JudgePanel showAfter={showAfter} judge={simulation?.judge} />}
         {lesson.panel === "companion" && <CompanionPanel showAfter={showAfter} />}
       </div>
@@ -187,7 +213,7 @@ export default function Home() {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
-      if (event.key === "/") { event.preventDefault(); searchRef.current?.focus(); return; }
+      if (!practice && event.key === "/") { event.preventDefault(); searchRef.current?.focus(); return; }
       if (practice) {
         event.preventDefault();
         const expected = normalizePracticeCommand(currentPracticeKey);

@@ -2,6 +2,15 @@ import type { Lesson } from "./tutorial-data";
 
 export type SimulatorMode = "NORMAL" | "INSERT" | "VISUAL" | "COMMAND" | "REPLACE";
 
+export type VimVisualState = {
+  kind: "mode" | "motion" | "viewport" | "edit" | "search" | "jump" | "register" | "macro" | "command" | "buffer" | "window" | "tab" | "netrw" | "template" | "companion" | "judge";
+  command: string;
+  direction?: "left" | "right" | "up" | "down" | "center" | "top" | "bottom";
+  query?: string;
+  register?: string;
+  count?: number;
+};
+
 export type JudgeState = {
   open: boolean;
   caseCount: number;
@@ -21,10 +30,45 @@ export type VimState = {
   closed: boolean;
   selection?: "character" | "line" | "block";
   judge?: JudgeState;
-  workspace: { file: string; view: "editor" | "netrw"; splits: number; tabs: number };
+  visual?: VimVisualState;
+  workspace: {
+    file: string;
+    view: "editor" | "netrw";
+    splits: number;
+    tabs: number;
+    activeSplit: number;
+    activeTab: number;
+    layout: "single" | "horizontal" | "vertical";
+    splitSize: "equal" | "height" | "width" | "grow" | "shrink";
+    viewport: number;
+    cursorAnchor: "free" | "center" | "top" | "bottom";
+  };
 };
 
-type CommandContext = Pick<Lesson, "id" | "after" | "panel"> | { panel?: Lesson["panel"]; id?: string; after?: string[] };
+type CommandContext = Pick<Lesson, "id" | "after" | "panel" | "cursorAfter"> | { panel?: Lesson["panel"]; id?: string; after?: string[]; cursorAfter?: [number, number] };
+
+function visualFor(command: string, context: CommandContext): VimVisualState {
+  const id = context.id ?? "";
+  if (context.panel === "judge" || id.startsWith("judge") || ["test-edit", "run", "verdicts"].includes(id)) return { kind: "judge", command };
+  if (id === "companion") return { kind: "companion", command };
+  if (id === "templates") return { kind: "template", command };
+  if (id === "netrw") return { kind: "netrw", command };
+  if (["split", "resize", "close-window"].includes(id)) return { kind: "window", command };
+  if (id === "tabs") return { kind: "tab", command };
+  if (id === "buffers") return { kind: "buffer", command };
+  if (id === "macro") return { kind: "macro", command, register: "a", count: Number(command.match(/^\d+/)?.[0] ?? 1) };
+  if (id === "registers" || id === "yank") return { kind: "register", command, register: command.match(/^"(.)/)?.[1] ?? '"' };
+  if (id === "search") return { kind: "search", command, query: command.replace(/^[:/?*#]/, "") || "cursor word", direction: command.startsWith("?") || command === "N" || command === "#" ? "up" : "down" };
+  if (["jumps", "definition", "marks"].includes(id)) return { kind: "jump", command, direction: command.includes("o") || command.includes("'") ? "up" : "down" };
+  if (["screen", "center", "scroll"].includes(id)) {
+    const direction = command.includes("u") || command.includes("b") || command.includes("y") ? "up" : command === "zt" ? "top" : command === "zb" ? "bottom" : command === "zz" ? "center" : "down";
+    return { kind: "viewport", command, direction };
+  }
+  if (["hjkl", "words", "line", "file"].includes(id)) return { kind: "motion", command, direction: command === "h" || command === "b" || command === "0" || command === "^" ? "left" : command === "k" ? "up" : command === "j" ? "down" : "right" };
+  if (["modes", "insert", "open-line", "visual"].includes(id)) return { kind: "mode", command };
+  if (["save-quit", "substitute-command"].includes(id) || command.startsWith(":")) return { kind: "command", command };
+  return { kind: "edit", command };
+}
 
 function clampCursor(lines: string[], cursor: [number, number]): [number, number] {
   const row = Math.min(Math.max(1, cursor[0]), Math.max(1, lines.length));
@@ -71,7 +115,7 @@ export function createVimState(
     saved: false,
     closed: false,
     judge: panel === "judge" ? { open: true, caseCount: 3, activeCase: 1, editing: false, help: false, verdict: "Ready" } : undefined,
-    workspace: { file: "solution.cpp", view: "editor", splits: 1, tabs: 1 },
+    workspace: { file: "solution.cpp", view: "editor", splits: 1, tabs: 1, activeSplit: 1, activeTab: 1, layout: "single", splitSize: "equal", viewport: 0, cursorAnchor: "free" },
   };
 }
 
@@ -117,6 +161,7 @@ function runJudgeCommand(state: VimState, command: string) {
 export function runVimCommand(input: VimState, command: string, context: CommandContext = {}): VimState {
   const state = cloneState(input);
   const key = command.trim();
+  state.visual = visualFor(key, context);
 
   if (context.panel === "judge") {
     state.judge ??= { open: true, caseCount: 3, activeCase: 1, editing: false, help: false, verdict: "Ready" };
@@ -127,7 +172,84 @@ export function runVimCommand(input: VimState, command: string, context: Command
   const line = currentLine(state);
   const colIndex = Math.min(Math.max(0, state.cursor[1] - 1), Math.max(0, line.length));
 
-  if (key === "Esc" || key === "Escape") {
+  if (context.id === "screen") {
+    const amount = key === "Ctrl-d" ? 4 : key === "Ctrl-u" ? -4 : key === "Ctrl-f" ? 8 : -8;
+    state.workspace.viewport += amount;
+    state.cursor = clampCursor(state.lines, [state.cursor[0] + amount, state.cursor[1]]);
+    state.message = `${amount > 0 ? "向下" : "向上"}捲動 ${Math.abs(amount)} 行`;
+  } else if (context.id === "center") {
+    state.workspace.cursorAnchor = key === "zt" ? "top" : key === "zb" ? "bottom" : "center";
+    state.message = `游標行移到畫面${state.workspace.cursorAnchor === "top" ? "頂端" : state.workspace.cursorAnchor === "bottom" ? "底端" : "中央"}`;
+  } else if (context.id === "scroll") {
+    state.workspace.viewport += key === "Ctrl-e" ? 1 : -1;
+    state.message = key === "Ctrl-e" ? "畫面向下捲動一行" : "畫面向上捲動一行";
+  } else if (context.id === "search") {
+    if (key === ":noh") {
+      state.visual = { kind: "search", command: key, query: "" };
+      state.message = "已清除搜尋高亮";
+    } else {
+      state.cursor = clampCursor(state.lines, context.cursorAfter ?? [Math.min(state.lines.length, state.cursor[0] + (state.visual.direction === "up" ? -1 : 1)), state.cursor[1]]);
+      state.message = `跳到${state.visual.direction === "up" ? "上一個" : "下一個"}搜尋結果`;
+    }
+  } else if (["jumps", "definition", "marks"].includes(context.id ?? "")) {
+    if (context.id === "marks" && key === "ma") state.message = "已在目前位置建立 mark a";
+    else if (key === ":marks") { state.mode = "COMMAND"; state.message = "顯示所有 marks"; }
+    else {
+      state.cursor = clampCursor(state.lines, context.cursorAfter ?? [key.includes("o") || key.includes("'") ? 1 : state.lines.length, 1]);
+      state.message = `已跳到 ${state.cursor[0]}:${state.cursor[1]}`;
+    }
+  } else if (context.id === "split") {
+    if (key === ":sp" || key === ":vs") {
+      state.workspace.splits = 2;
+      state.workspace.layout = key === ":sp" ? "horizontal" : "vertical";
+    } else {
+      state.workspace.splits = 2;
+      state.workspace.layout = "vertical";
+      state.workspace.activeSplit = state.workspace.activeSplit === 1 ? 2 : 1;
+    }
+    state.message = key === ":sp" ? "建立水平分割" : key === ":vs" ? "建立垂直分割" : `焦點切到窗格 ${state.workspace.activeSplit}`;
+  } else if (context.id === "resize") {
+    state.workspace.splits = 2;
+    state.workspace.layout = "vertical";
+    state.workspace.splitSize = key === "Ctrl-w =" ? "equal" : key === "Ctrl-w _" ? "height" : key === "Ctrl-w |" ? "width" : key.includes(">") ? "grow" : "shrink";
+    state.message = `分割視窗尺寸：${state.workspace.splitSize}`;
+  } else if (context.id === "close-window") {
+    state.workspace.splits = key === "Ctrl-w o" ? 1 : Math.max(1, state.workspace.splits - 1);
+    state.workspace.layout = "single";
+    state.message = key === "Ctrl-w o" ? "只保留目前窗格" : "關閉目前窗格";
+  } else if (context.id === "tabs") {
+    if (key === ":tabnew") { state.workspace.tabs = 2; state.workspace.activeTab = 2; }
+    else if (key === ":tabclose") state.workspace.tabs = 1;
+    else if (key === "gT") state.workspace.activeTab = Math.max(1, state.workspace.activeTab - 1);
+    else if (key === "3gt") { state.workspace.tabs = 3; state.workspace.activeTab = 3; }
+    else { state.workspace.tabs = Math.max(2, state.workspace.tabs); state.workspace.activeTab = state.workspace.activeTab % state.workspace.tabs + 1; }
+    state.message = `目前在 Tab ${state.workspace.activeTab}/${state.workspace.tabs}`;
+  } else if (context.id === "buffers" && key === "Ctrl-^") {
+    state.workspace.file = state.workspace.file === "solution.cpp" ? "template.cpp" : "solution.cpp";
+    state.lines = [...(context.after ?? state.lines)];
+    state.message = `切換到上一個 buffer：${state.workspace.file}`;
+  } else if (context.id === "netrw") {
+    state.workspace.view = key === "q" ? "editor" : "netrw";
+    if (key === "Enter") state.lines = ["// solution.cpp", "#include <bits/stdc++.h>", "int main() {}"];
+    else if (key === "-") state.lines = ["../", "CODE/", "Documents/", "Downloads/"];
+    else if (key === "%") state.lines.splice(2, 0, "  new_file.cpp");
+    else if (key === "d") state.lines.splice(2, 0, "  new_folder/");
+    else if (key === "D") state.lines.splice(Math.min(lineIndex, state.lines.length - 1), 1);
+    else if (key === "R") state.lines[Math.min(lineIndex, state.lines.length - 1)] = "  renamed.cpp";
+    else if (key === "i") state.lines = state.lines.map((item, index) => `${index === 0 ? "▾" : "├"} ${item.trim()}`);
+    state.cursor = clampCursor(state.lines, [Math.min(2, state.lines.length), 1]);
+    state.message = key === "q" ? "關閉 Netrw" : `Netrw 執行 ${key}`;
+  } else if (context.id === "text-object" && key !== "diw" && context.after?.length) {
+    state.clipboard = [line];
+    state.lines = [...context.after];
+    state.cursor = clampCursor(state.lines, context.cursorAfter ?? [1, 1]);
+    state.message = `已依文字物件 ${key.slice(1)} 刪除範圍`;
+  } else if (context.id === "registers" && key !== ":registers") {
+    if (key === '"ayy') state.clipboard = [line];
+    else if (key === '"ap') state.lines.splice(lineIndex + 1, 0, state.clipboard[0] ?? line);
+    else if (key === '"_dd') state.lines.splice(lineIndex, 1);
+    state.message = key === '"_dd' ? "刪除到黑洞暫存器" : "命名暫存器 a 已更新";
+  } else if (key === "Esc" || key === "Escape") {
     state.mode = "NORMAL";
     state.selection = undefined;
     state.message = "NORMAL 模式";
@@ -269,7 +391,9 @@ export function runVimCommand(input: VimState, command: string, context: Command
       if (parts.length >= 2) {
         const [from, to] = parts;
         const targets = key.startsWith(":%") ? state.lines.map((_, index) => index) : [lineIndex];
+        const beforeReplace = state.lines.join("\n");
         targets.forEach((index) => { state.lines[index] = state.lines[index].split(from).join(to); });
+        if (state.lines.join("\n") === beforeReplace && context.after?.length) state.lines = [...context.after];
         state.message = `已將 ${from} 取代為 ${to}`;
       }
     } else state.message = `已執行 ${key}`;
